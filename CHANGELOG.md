@@ -1,7 +1,19 @@
 # Changelog
 
-## 1.1.8-preview
+## 1.1.11-preview
+
+## 1.1.10
+- Added German translations. Thanks to flxcraft for the contribution ([PR #141](https://github.com/thelastoutpostworkshop/ESPConnect/pull/141)).
+
+## 1.1.9
 ### Improvement
+- Partitions tools now auto-detect non-standard partition table offsets (for example custom bootloaders/secure-boot layouts) while keeping the UI simple. Thanks to grene78 for the contribution ([PR #137](https://github.com/thelastoutpostworkshop/ESPConnect/pull/137)).
+- Added Turkish translations. Thanks to HamzaYslmn for the contribution ([PR #138](https://github.com/thelastoutpostworkshop/ESPConnect/pull/138)).
+
+## 1.1.8
+### Improvement
+- Fixed LittleFS not detected ([issue #132](https://github.com/thelastoutpostworkshop/ESPConnect/issues/132)).
+- Implemented an Electron-only serial-port chooser ([issue #128](https://github.com/thelastoutpostworkshop/ESPConnect/issues/128)).
 - Session log now records chip pkgVersion/chipRevision/chip ID values.
 
 ### Documentation

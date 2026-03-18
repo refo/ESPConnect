@@ -545,6 +545,8 @@
     english: 'English',
     french: 'Français',
     chinese: '简体中文',
+    turkish: 'Türkçe',
+    german: 'Allemand',
     switchTo: 'Passer à {language}',
   },
   theme: {

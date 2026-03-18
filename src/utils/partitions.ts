@@ -11,6 +11,8 @@ function logWarn(log: LogFn | undefined, message: string, detail?: unknown) {
 const PROBE_BYTES = 64 * 1024;
 const FAT_SECTOR_SIZE = 512;
 const LITTLEFS_VERSIONS = new Set([0x00020000, 0x00020001]);
+const LITTLEFS_SUPERBLOCK_TAG_PREFIX = 0xf7ff0ff0;
+const LITTLEFS_SUPERBLOCK_MIRROR_DISTANCE = 0x1000;
 const SPIFFS_PAGE_SIZES = [256, 512];
 const asciiEncoder = new TextEncoder();
 const LITTLEFS_MARKER = asciiEncoder.encode('littlefs/');
@@ -43,6 +45,30 @@ function hasLittlefsMarker(data: Uint8Array) {
   return findSequence(data, LITTLEFS_MARKER) >= 0;
 }
 
+function hasSequenceAt(data: Uint8Array, needle: Uint8Array, offset: number) {
+  if (offset < 0 || offset + needle.length > data.length) {
+    return false;
+  }
+  for (let index = 0; index < needle.length; index += 1) {
+    if (data[offset + index] !== needle[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasLittlefsTagPrefix(index: number, view: DataView) {
+  if (index < 4) {
+    return false;
+  }
+  return view.getUint32(index - 4, true) === LITTLEFS_SUPERBLOCK_TAG_PREFIX;
+}
+
+function hasMirroredLittlefsSuperblock(index: number, data: Uint8Array, view: DataView) {
+  const candidates = [index - LITTLEFS_SUPERBLOCK_MIRROR_DISTANCE, index + LITTLEFS_SUPERBLOCK_MIRROR_DISTANCE];
+  return candidates.some(candidate => hasSequenceAt(data, LITTLEFS_MAGIC, candidate) && hasLittlefsTagPrefix(candidate, view));
+}
+
 function hasLittlefsSuperblock(data: Uint8Array, view: DataView) {
   let offset = 0;
   while (offset <= data.length - LITTLEFS_MAGIC.length) {
@@ -56,6 +82,9 @@ function hasLittlefsSuperblock(data: Uint8Array, view: DataView) {
       if (LITTLEFS_VERSIONS.has(version)) {
         return true;
       }
+    }
+    if (hasLittlefsTagPrefix(index, view) && hasMirroredLittlefsSuperblock(index, data, view)) {
+      return true;
     }
     offset = index + 1;
   }
@@ -163,12 +192,74 @@ export async function detectFilesystemType(
   }
 }
 
+const PARTITION_ENTRY_MAGIC_LE = 0x50aa;
+const DEFAULT_PARTITION_TABLE_OFFSET = 0x8000;
+const PARTITION_ENTRY_SIZE = 32;
+const PARTITION_ALIGNMENT = 0x1000;
+const PARTITION_TABLE_PROBE_OFFSETS = [
+  0x8000, 0x9000, 0xa000, 0xc000, 0xd000, 0xe000, 0x10000,
+];
+
+function hasPlausiblePartitionEntry(data: Uint8Array) {
+  if (data.length < PARTITION_ENTRY_SIZE) {
+    return false;
+  }
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (view.getUint16(0, true) !== PARTITION_ENTRY_MAGIC_LE) {
+    return false;
+  }
+  const type = view.getUint8(2);
+  const offset = view.getUint32(4, true);
+  const size = view.getUint32(8, true);
+  if (type === 0xff) {
+    return false;
+  }
+  if (offset < PARTITION_ALIGNMENT || size < PARTITION_ALIGNMENT) {
+    return false;
+  }
+  if (offset % PARTITION_ALIGNMENT !== 0 || size % PARTITION_ALIGNMENT !== 0) {
+    return false;
+  }
+  return true;
+}
+
+export async function probePartitionTableOffset(
+  loader: { readFlash: (offset: number, length: number) => Promise<Uint8Array> },
+  log?: LogFn,
+): Promise<number | null> {
+  for (const candidate of PARTITION_TABLE_PROBE_OFFSETS) {
+    try {
+      const data = await loader.readFlash(candidate, PARTITION_ENTRY_SIZE);
+      if (hasPlausiblePartitionEntry(data)) {
+        if (candidate !== DEFAULT_PARTITION_TABLE_OFFSET) {
+          logInfo(log, `Partition table detected at non-standard offset 0x${candidate.toString(16)}.`);
+        }
+        return candidate;
+      }
+    } catch {
+      // probe failed for this offset, try next
+    }
+  }
+  logWarn(log, 'No plausible partition table entry found at any probed offset.');
+  return null;
+}
+
 export async function readPartitionTable(
   loader: { readFlash: (offset: number, length: number) => Promise<Uint8Array> },
-  offset = 0x8000,
+  offset?: number,
   length = 0x400,
   log?: LogFn,
 ) {
+  if (offset == null) {
+    const detectedOffset = await probePartitionTableOffset(loader, log);
+    offset = detectedOffset ?? DEFAULT_PARTITION_TABLE_OFFSET;
+    if (detectedOffset == null) {
+      logWarn(
+        log,
+        `Falling back to default partition table offset 0x${DEFAULT_PARTITION_TABLE_OFFSET.toString(16)}.`,
+      );
+    }
+  }
   try {
     const data = await loader.readFlash(offset, length);
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -181,10 +272,10 @@ export async function readPartitionTable(
       size: number;
       detectedFilesystem?: DetectedFilesystem;
     }> = [];
-    for (let i = 0; i + 32 <= data.length; i += 32) {
+    for (let i = 0; i + PARTITION_ENTRY_SIZE <= data.length; i += PARTITION_ENTRY_SIZE) {
       const magic = view.getUint16(i, true);
       if (magic === 0xffff || magic === 0x0000) break;
-      if (magic !== 0x50aa) continue;
+      if (magic !== PARTITION_ENTRY_MAGIC_LE) continue;
       const type = view.getUint8(i + 2);
       const subtype = view.getUint8(i + 3);
       const addr = view.getUint32(i + 4, true);
